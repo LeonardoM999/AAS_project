@@ -1,2 +1,2 @@
 # AAS_project
-Overcooked_ai rl agent for the exam of Autonomous Adaptive systems by prof M. Musolesi. 
+Overcooked_ai rl agent for the exam of Autonomous Adaptive Systems by prof M. Musolesi. 
