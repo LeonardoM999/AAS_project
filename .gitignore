@@ -209,3 +209,4 @@ __marimo__/
 .gitignore
 examples/
 .vscode/
+mnist_convnet.py
