@@ -1,3 +1,4 @@
+import json
 from math import exp
 import keras
 from tensorflow.keras.models import Model
@@ -15,61 +16,22 @@ from gen_env import GeneralizedOvercooked
 POLICY_HIDDEN_SIZES = (256, 128)
 CRITIC_HIDDEN_SIZES = (128, 64)
 DISCOUNT_GAMMA = 0.99  # 0.95
-ADVANTAGE_LAMBDA = 0.98  # 0.95
-# ACTIVATION="tanh"
+ADVANTAGE_LAMBDA = 0.95  # 0.95
+# ACTIVATION = "tanh"
 ACTIVATION = "leaky_relu"
 # ACTIVATION = "relu"
 BATCH_SIZE = 256
-N_EPOCHS = 5
+N_EPOCHS = 7
 PPO_EPS = 0.3
 ENTROPY_FACTOR = 0.05  # 0.01 0.05
 LR_POLICY = 3e-4
 LR_CRITIC = 1e-3
 CRITIC_COEFF = 0.5  # 0.01
 MAX_GRAD_NORM = 0.5
-USE_LR_DECAY = False
+USE_LR_DECAY = False  # bad
 SCALE = 1.0  # 0.1 , 0.5, 1.0, 2.0, 5.0
 STANDARDIZE_NN_INPUTS = False
 STANDARDIZE_ADV = True
-
-
-class TrainingLogger:
-    def __init__(self, window_size=100):
-        self.episode_rewards = deque(maxlen=window_size)
-        self.policy_losses = []
-        self.value_losses = []
-        self.kl_divs = []
-        self.entropy_values = []
-        self.explained_variances = []
-
-    def log_episode(self, reward):
-        self.episode_rewards.append(reward)
-
-    def log_training(self, policy_loss, value_loss, kl_div, entropy, explained_var):
-        self.policy_losses.append(policy_loss)
-        self.value_losses.append(value_loss)
-        self.kl_divs.append(kl_div)
-        self.entropy_values.append(entropy)
-        self.explained_variances.append(explained_var)
-
-    def print_stats(self, episode_n):
-        if len(self.episode_rewards) == 0:
-            return
-
-        print(f"\n{'='*60}")
-        print(f"Episode {episode_n}")
-        print(
-            f"Average Reward (last {len(self.episode_rewards)}): {np.mean(self.episode_rewards):.2f} ± {np.std(self.episode_rewards):.2f}"
-        )
-        print(f"Average Length: {np.mean(self.episode_lengths):.1f}")
-
-        if len(self.policy_losses) > 0:
-            print(f"Policy Loss: {np.mean(self.policy_losses[-10:]):.4f}")
-            print(f"Value Loss: {np.mean(self.value_losses[-10:]):.4f}")
-            print(f"KL Divergence: {np.mean(self.kl_divs[-10:]):.6f}")
-            print(f"Entropy: {np.mean(self.entropy_values[-10:]):.4f}")
-            print(f"Explained Variance: {np.mean(self.explained_variances[-10:]):.4f}")
-        print(f"{'='*60}\n")
 
 
 class MyBuffer:
@@ -95,15 +57,12 @@ class MyBuffer:
         self.cursor = 0
         self.device = device
 
-        # TODO controllare che anche reward debba essere per forza un tensore
-
         # use cpu memory
         # (cuda)malloc tensors
         # assume: state_shape = obs_shape
         # self.states = tf.Variable(
         #     tf.zeros((buffer_size, *obs_shape), dtype=tf.float32)
         # )
-        # TODO check state shape is correct
 
         # batch:
         self.states = np.zeros((buffer_size, state_shape))
@@ -151,7 +110,7 @@ class MyBuffer:
                 (self.action0s, self.action1s),
                 (self.logp0s, self.logp1s),
                 (self.advantages0, self.advantages1),
-                (self.expected_returns0, self.expected_returns1),
+                (self.expected_returns0, self.expected_returns1),  # self.values
             ]
         ]
         double_cursor = self.cursor * 2
@@ -259,17 +218,18 @@ class MyBuffer:
             else:
                 # if episode terminates: next_val=0
                 next_val = self.values[t + 1] * (1 - self.episode_overs[t])
-            # TODO: check che sia corretto
-            expected_return0 = self.reward0s[t] + gamma * next_val
-            delta0 = expected_return0 - self.values[t]
+            delta0 = self.reward0s[t] + gamma * next_val - self.values[t]
             gae0 = delta0 + gamma * lam * gae0  # *(1 - self.episode_overs[t])
             self.advantages0[t] = gae0
+            # expected_return0 = self.reward0s[t] + gamma * next_val # TD 0
+            expected_return0 = gae0 + self.values[t]
             self.expected_returns0[t] = expected_return0  # gae0 + self.values[t]
 
-            expected_return1 = self.reward1s[t] + gamma * next_val
-            delta1 = expected_return1 - self.values[t]
+            delta1 = self.reward1s[t] + gamma * next_val - self.values[t]
             gae1 = delta1 + gamma * lam * gae1  # *(1 - self.episode_overs[t])
             self.advantages1[t] = gae1
+            # expected_return1 = self.reward1s[t] + gamma * next_val # TD 0
+            expected_return1 = gae1 + self.values[t]
             self.expected_returns1[t] = expected_return1  # gae1 + self.values[t]
 
     def print_std(self):
@@ -374,37 +334,28 @@ class DenseValueNN(Model):
         return cls(**config)
 
 
-# TODO remove
-class ConvPolicyNN(Model):
-    def __init__(
-        self,
-        sizes=((3, 16), (3, 16)),
-        hidden_sizes=(64,),
-        n_actions=6,
-    ):
-        super().__init__()
-        self.input = layers.Input(shape=(None, None, 26))
-        self.convs = [
-            layers.Conv2D(
-                filters=ff,
-                kernel_size=(ks, ks),
-                padding="same",
-                activation="leaky_relu",
-            )
-            for (ks, ff) in sizes
-        ]
-        self.denses = [layers.Dense(hsize, activation="leaky_relu") for hsize in hidden_sizes]
-        self.logits_layer = layers.Dense(n_actions)  # raw logits
-
-    def call(self, inputs):
-        x = inputs  # TODO shape
-        for c in self.convs:
-            x = c(x)
-        x = layers.Flatten()(x)  # TODO:error: not constant shape for denses
-
-        for d in self.denses:
-            x = d(x)
-        return self.logits_layer(x)  # return logits
+def evaluate_agent_on_layouts(
+    agent,
+    layouts,
+    num_episodes=5,
+):
+    scores_by_layout = {}
+    for layout in layouts:
+        env = GeneralizedOvercooked(layouts=[layout])
+        scores = []
+        for episode in range(num_episodes):
+            # print(f"{layout}  {episode+1} / {num_episodes}")
+            state, obss = env.reset()
+            episode_over = False
+            score = 0
+            while not episode_over:
+                actions, _logprobs, _critic_val = agent.act(obss[0], obss[1], state)
+                state, obss, reward, episode_over, info = env.step(actions)
+                score += reward
+            scores.append(score)
+        scores_by_layout.update({layout: (np.average(scores), np.std(scores))})
+    print(scores_by_layout)
+    return scores_by_layout
 
 
 class DumbAgent:
@@ -415,24 +366,25 @@ class DumbAgent:
         self.value_nn = DenseValueNN(hidden_sizes=CRITIC_HIDDEN_SIZES, activation=ACTIVATION)
         self.policy_nn = DensePolicyNN(hidden_sizes=POLICY_HIDDEN_SIZES, n_actions=6, activation=ACTIVATION)
         self.policy_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-            initial_learning_rate=lr_policy, decay_steps=1000, decay_rate=0.9
+            initial_learning_rate=lr_policy, decay_steps=50, decay_rate=0.9
         )
         self.critic_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-            initial_learning_rate=lr_critic, decay_steps=1000, decay_rate=0.9
+            initial_learning_rate=lr_critic, decay_steps=50, decay_rate=0.9
         )
         self.policy_optimizer = tf.keras.optimizers.Adam(self.policy_schedule if decay else lr_policy)
         self.critic_optimizer = tf.keras.optimizers.Adam(self.critic_schedule if decay else lr_critic)
-        self.logger = TrainingLogger()
 
     def store_step(self, state, obss, actions, rewards, episode_over, value, logprobs):
         self.buffer.store_smth(state, obss, actions, rewards, episode_over, value, logprobs)
 
-    def save(self, path="weights"):
+    def save(self, path="weights", hist={}):
         t = time.time()
         ckpoint_id = int((t * 10) % 1e6)
         lt = time.localtime(t)
         self.policy_nn.save(f"{path}/policy_{lt[3]}_{lt[4]}_{lt[5]}_{ckpoint_id}.keras")
         self.value_nn.save(f"{path}/value_{lt[3]}_{lt[4]}_{lt[5]}_{ckpoint_id}.keras")
+        with open(f"{path}/hist.json", "w") as f:
+            json.dump(hist, f, indent=2)
 
     def _get_ckpoint_id(self, path):
         name = os.path.splitext(os.path.basename(path))[0]  # remove type
@@ -513,7 +465,7 @@ class DumbAgent:
                             ratio * batch["advantage"],
                             (tf.clip_by_value(ratio, 1 - ppo_eps, 1 + ppo_eps)) * batch["advantage"],
                         ),
-                        axis=None,  # TODO check axis
+                        axis=None,
                     )
 
                     # entropy loss:
@@ -540,11 +492,12 @@ class DumbAgent:
         return pol_grad_norm, critic_grad_norm
 
     # train agent
-    def train(self, env: GeneralizedOvercooked, n_episodes=1000):
+    def train(self, env: GeneralizedOvercooked, n_episodes=1000, eval_layouts=["cramped_room"]):
         epoch_n = 0
         score_history = []
         policy_gradient_norm_history = []
         critic_gradient_norm_history = []
+        scores_history = []
 
         for episode_n in trange(n_episodes, colour="blue", desc="Episodes"):
             # while epoch_n < n_epochs:
@@ -564,7 +517,7 @@ class DumbAgent:
                 # clipped_reward = clip_reward(reward)
                 shaped_rewards = (
                     SCALE * np.array(info["shaped_r_by_agent"]) + reward
-                )  # TODO anche senza + reward
+                )  # without + reward works bad
 
                 # if sum(shaped_rewards) != 0:
                 #    print(f"{actions}  {shaped_rewards}")
@@ -574,7 +527,7 @@ class DumbAgent:
                     obss,
                     actions,
                     shaped_rewards,
-                    # (reward, reward), #così anche peggio
+                    # (reward, reward), # even worse
                     episode_over,
                     critic_val,
                     logprobs,
@@ -595,6 +548,9 @@ class DumbAgent:
                 print(f"EPISODE {episode_n}:\t SCORE = {score}")
             if 1 + episode_n % 100 == 0:
                 self.save()
+            if (episode_n % 50) == 0 and episode_n > 300:  # or ((episode_n % 20) == 0 and episode_n > 200):
+                scores_by_layout = evaluate_agent_on_layouts(self, layouts=eval_layouts)
+                scores_history.append({episode_n: scores_by_layout})
         # end for training steps
         if self.buffer.cursor >= 100:
             # make sure not to throw away good data
@@ -603,10 +559,7 @@ class DumbAgent:
 
         # print(policy_gradient_norm_history)
 
-        self.save()
+        self.save(hist=scores_history)
         env.close()
         # print/plot statistics
-
-    # test agent
-    def test_agent():
-        1
+        # return scores_history

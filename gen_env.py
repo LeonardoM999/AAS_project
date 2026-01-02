@@ -57,8 +57,9 @@ class GeneralizedOvercooked:
             _info,
         )
 
-    def render(self, *args):
-        next_state, reward, episode_over, _info = self.cur_env.render(*args)
+    def render(self):
+        img = self.cur_env.render()
+        return img
 
     def close(self):
         for e in self.envs:
