@@ -213,3 +213,4 @@ mnist_convnet.py
 test.py
 main.py
 overcooked_ai/*
+pngs/*
